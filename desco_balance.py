@@ -74,7 +74,7 @@ def get_desco_balance():
     try:
         print(f"Attempting to login at {LOGIN_URL}...")
         login_data = { ACCOUNT_NO_FIELD_NAME: DESCO_ACCOUNT_NO }
-        login_response = session.post(LOGIN_URL, data=login_data)
+        login_response = session.post(LOGIN_URL, data=login_data, verify=False)
         login_response.raise_for_status()
 
         # Adjust login success check based on DESCO's site behavior after login
