@@ -13,20 +13,13 @@ CHAT_ID = os.environ.get('CHAT_ID')
 
 YOUR_TIMEZONE = "Asia/Dhaka" # Your local timezone
 
-### --- ACTION NEEDED: Update these based on DESCO Website Inspection (Step 3) --- ###
-# 1. Replace with the actual URL of the DESCO login page
+### --- ACTION NEEDED: Ensure these are correct based on DESCO Website Inspection --- ###
 LOGIN_URL = 'https://prepaid.desco.org.bd/customer/#/customer-login' #<- REPLACE IF NEEDED
-
-# 2. Replace with the actual URL of the page showing the balance AFTER login
-BALANCE_PAGE_URL = 'https://prepaid.desco.org.bd/customer/#/customer-info' #<- REPLACE IF NEEDED (might be same as login result)
-
-# 3. Replace 'account_no' with the actual 'name' attribute of the account number input field found in Step 3.1
-ACCOUNT_NO_FIELD_NAME = 'account_no' #<- REPLACE IF NEEDED (e.g., 'meter_no', 'customer_id')
-
-# 4. Based on Step 3.2, these should target the balance structure found in the screenshot
-BALANCE_ELEMENT_TAG = 'span'     # The tag containing the balance value itself
-BALANCE_ELEMENT_ID = None        # Likely None based on screenshot
-BALANCE_ELEMENT_CLASS = None     # Likely None based on screenshot (using parent <p> instead)
+BALANCE_PAGE_URL = 'https://prepaid.desco.org.bd/customer/#/customer-info' #<- REPLACE IF NEEDED
+ACCOUNT_NO_FIELD_NAME = 'account_no' #<- REPLACE IF NEEDED
+BALANCE_ELEMENT_TAG = 'span'     # Should be correct based on screenshot
+BALANCE_ELEMENT_ID = None        # Should be correct based on screenshot
+BALANCE_ELEMENT_CLASS = None     # Should be correct based on screenshot
 ### -------------------------------------------------------------------------------------- ###
 
 # --- Functions ---
@@ -48,12 +41,10 @@ def send_telegram_message(raw_balance_text):
                 message += recharge_reminder
                 print("Low balance detected, adding recharge reminder.")
         else:
-            # Handle cases where balance text might be non-numeric words like "Unavailable" or "Error"
             if "Could not retrieve" in raw_balance_text or "not found" in raw_balance_text or "failed" in raw_balance_text:
                  print("Balance retrieval failed, sending raw text.")
             else:
                  print("Could not extract numeric value from balance text.")
-
     except ValueError:
         print(f"Could not convert cleaned balance '{cleaned_balance}' to a number.")
     except Exception as e:
@@ -61,7 +52,7 @@ def send_telegram_message(raw_balance_text):
 
     api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     try:
-        response = requests.post(api_url, json={'chat_id': CHAT_ID, 'text': message})
+        response = requests.post(api_url, json={'chat_id': CHAT_ID, 'text': message}, timeout=10) # Added timeout
         response.raise_for_status()
         print("Telegram message sent successfully.")
     except Exception as e:
@@ -71,20 +62,27 @@ def get_desco_balance():
     """Logs into DESCO using account number, scrapes balance, and returns the RAW text."""
     raw_balance_text = "Could not retrieve balance"
     session = requests.Session()
+    session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}) # Add User-Agent
+
     try:
         print(f"Attempting to login at {LOGIN_URL}...")
         login_data = { ACCOUNT_NO_FIELD_NAME: DESCO_ACCOUNT_NO }
-        login_response = session.post(LOGIN_URL, data=login_data, verify=False)
+        
+        # Add verify=False to handle potential SSL errors
+        login_response = session.post(LOGIN_URL, data=login_data, verify=False, timeout=15) # Added timeout and verify=False
         login_response.raise_for_status()
 
         # Adjust login success check based on DESCO's site behavior after login
-        if "dashboard" in login_response.url or "Account Summary" in login_response.text or login_response.status_code == 200: # Broad checks
+        # Check URL or specific text on the page to confirm login worked
+        if "dashboard" in login_response.url or "Account Summary" in login_response.text or "Logout" in login_response.text: # Added "Logout" check
             print("Login successful (probably). Parsing balance page...")
             balance_page_content = login_response.content
+            
             # If balance is on a DIFFERENT page you have to navigate to:
-            # if login_response.url != BALANCE_PAGE_URL:
+            # Uncomment and adjust if needed
+            # if login_response.url.strip('/') != BALANCE_PAGE_URL.strip('/'):
             #     print(f"Navigating to {BALANCE_PAGE_URL}...")
-            #     balance_page_response = session.get(BALANCE_PAGE_URL)
+            #     balance_page_response = session.get(BALANCE_PAGE_URL, verify=False, timeout=15) # Added verify=False and timeout
             #     balance_page_response.raise_for_status()
             #     balance_page_content = balance_page_response.content
 
@@ -112,15 +110,20 @@ def get_desco_balance():
                 raw_balance_text = balance_element.get_text(strip=True)
                 print(f"Raw balance text found: {raw_balance_text}")
             else:
-                else:
+                # Debugging print statements MUST be indented correctly inside this else block
                 print("Balance element structure (<p> with 'Remaining Balance:' containing a <span>) not found.")
-                print("--- PAGE HTML START ---") # Added line
-                print(soup.prettify())          # Added line - This prints the HTML
-                print("--- PAGE HTML END ---")   # Added line
+                print("--- PAGE HTML START ---")
+                print(soup.prettify()) # Print the HTML for debugging
+                print("--- PAGE HTML END ---")
                 raw_balance_text = "Balance element structure not found."
+        # This else corresponds to the 'if' checking for successful login
         else:
             print(f"Login failed. Status code: {login_response.status_code}. Final URL: {login_response.url}")
+            print("--- LOGIN FAILED - PAGE CONTENT START ---")
+            print(login_response.text[:1000]) # Print first 1000 chars of response
+            print("--- LOGIN FAILED - PAGE CONTENT END ---")
             raw_balance_text = "Login failed."
+
     except requests.exceptions.RequestException as e:
         print(f"Network or HTTP error during scraping: {e}")
         raw_balance_text = f"Network Error: {e}"
@@ -129,6 +132,7 @@ def get_desco_balance():
         raw_balance_text = f"Script Error: {e}"
     finally:
         session.close()
+        
     return raw_balance_text
 
 # --- Main Execution ---
