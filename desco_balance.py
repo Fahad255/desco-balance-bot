@@ -112,7 +112,11 @@ def get_desco_balance():
                 raw_balance_text = balance_element.get_text(strip=True)
                 print(f"Raw balance text found: {raw_balance_text}")
             else:
+                else:
                 print("Balance element structure (<p> with 'Remaining Balance:' containing a <span>) not found.")
+                print("--- PAGE HTML START ---") # Added line
+                print(soup.prettify())          # Added line - This prints the HTML
+                print("--- PAGE HTML END ---")   # Added line
                 raw_balance_text = "Balance element structure not found."
         else:
             print(f"Login failed. Status code: {login_response.status_code}. Final URL: {login_response.url}")
