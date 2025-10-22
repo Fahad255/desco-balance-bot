@@ -1,6 +1,5 @@
 import requests
 import os
-from bs4 import BeautifulSoup
 from datetime import datetime
 import zoneinfo # Requires Python 3.9+
 import re # Import the regular expression module
@@ -13,168 +12,131 @@ CHAT_ID = os.environ.get('CHAT_ID')
 
 YOUR_TIMEZONE = "Asia/Dhaka" # Your local timezone
 
-### --- ACTION NEEDED: Ensure these are correct based on DESCO Website Inspection --- ###
-LOGIN_URL = 'https://prepaid.desco.org.bd/customer/#/customer-login' #<- REPLACE IF NEEDED
-BALANCE_PAGE_URL = 'https://prepaid.desco.org.bd/customer/#/customer-info' #<- REPLACE IF NEEDED
-ACCOUNT_NO_FIELD_NAME = 'account_no' #<- REPLACE IF NEEDED
-BALANCE_ELEMENT_TAG = 'span'     # Should be correct based on screenshot
-BALANCE_ELEMENT_ID = None        # Should be correct based on screenshot
-BALANCE_ELEMENT_CLASS = None     # Should be correct based on screenshot
-### -------------------------------------------------------------------------------------- ###
+# --- ACTION NEEDED: Confirm the base API URL if necessary ---
+# This is the URL we found in the Network tab, up to the '?'
+# It includes '/api/tkdes/customer' which looks correct
+API_BASE_URL = "https://prepaid.desco.org.bd/api/tkdes/customer/getBalance"
+# We might still need the login page URL just to initialize a session cookie
+INITIAL_PAGE_URL = 'https://prepaid.desco.org.bd/customer/#/customer-login' # URL of the page you first visit
+# --- End Configuration ---
 
 # --- Functions ---
 
-def send_telegram_message(raw_balance_text):
+def send_telegram_message(balance_value):
     """Sends the formatted message, adding a recharge reminder if balance is low."""
     tz = zoneinfo.ZoneInfo(YOUR_TIMEZONE)
     now = datetime.now(tz)
     timestamp = now.strftime('%d-%b-%Y %I:%M %p')
-    message = f"DESCO Balance Update ({timestamp}):\n\n{raw_balance_text}"
+
+    # Format the balance nicely
+    balance_text = f"{balance_value:.2f} BDT" # Show 2 decimal places and currency
+    message = f"DESCO Balance Update ({timestamp}):\n\n{balance_text}"
     recharge_reminder = "\n\n⚠️ Low Balance! Please recharge soon."
 
     try:
-        cleaned_balance = re.sub(r'[^\d.]', '', raw_balance_text)
-        if cleaned_balance:
-            balance_float = float(cleaned_balance)
-            print(f"Numeric balance extracted: {balance_float}")
-            if balance_float < 100:
-                message += recharge_reminder
-                print("Low balance detected, adding recharge reminder.")
-        else:
-            if "Could not retrieve" in raw_balance_text or "not found" in raw_balance_text or "failed" in raw_balance_text:
-                 print("Balance retrieval failed, sending raw text.")
-            else:
-                 print("Could not extract numeric value from balance text.")
-    except ValueError:
-        print(f"Could not convert cleaned balance '{cleaned_balance}' to a number.")
+        # Check if balance is low (now using the direct numeric value)
+        if balance_value < 100:
+            message += recharge_reminder
+            print("Low balance detected, adding recharge reminder.")
+
     except Exception as e:
         print(f"Error during balance check/conversion: {e}")
+        # If conversion fails, send the raw value as fallback if needed (though it should be a number now)
+        message = f"DESCO Balance Update ({timestamp}):\n\nCould not process balance value: {balance_value}"
 
+
+    # Send the final message via Telegram API
     api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     try:
-        response = requests.post(api_url, json={'chat_id': CHAT_ID, 'text': message}, timeout=10) # Added timeout
+        response = requests.post(api_url, json={'chat_id': CHAT_ID, 'text': message}, timeout=10)
         response.raise_for_status()
         print("Telegram message sent successfully.")
     except Exception as e:
         print(f"Error sending Telegram message: {e}")
 
-def get_desco_balance():
-    """Logs into DESCO using account number (handles potential CSRF), scrapes balance."""
-    raw_balance_text = "Could not retrieve balance"
+def get_desco_balance_api():
+    """Fetches DESCO balance directly via API."""
+    balance = None # Use None to indicate failure, will convert to text later
     session = requests.Session()
     session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
 
     try:
-        print(f"Fetching login page to find tokens: {LOGIN_URL}...")
-        # 1. Get the login page first
-        get_response = session.get(LOGIN_URL, verify=False, timeout=15)
-        get_response.raise_for_status()
-        soup_login = BeautifulSoup(get_response.content, 'html.parser')
+        # Step 1: Visit the initial page to potentially get necessary cookies/session established
+        print(f"Visiting initial page: {INITIAL_PAGE_URL}...")
+        session.get(INITIAL_PAGE_URL, verify=False, timeout=15) # We don't care about the response, just need cookies potentially
+        print("Initial page visited.")
 
-        # 2. Find potential hidden tokens (common names, adjust if needed)
-        login_data = { ACCOUNT_NO_FIELD_NAME: DESCO_ACCOUNT_NO }
-        possible_token_names = ['csrf_token', '_token', 'authenticity_token', '__VIEWSTATE', '__EVENTVALIDATION']
-        found_token = False
-        for token_name in possible_token_names:
-            token_element = soup_login.find('input', {'name': token_name})
-            if token_element and token_element.get('value'):
-                login_data[token_name] = token_element['value']
-                print(f"Found hidden token: {token_name}")
-                found_token = True
-                # break # Uncomment if you're sure there's only one token needed
+        # Step 2: Construct the API URL with the account number
+        api_url = f"{API_BASE_URL}?accountNo={DESCO_ACCOUNT_NO}&meterNo=" # Added empty meterNo param
+        print(f"Fetching balance from API: {api_url}...")
 
-        if not found_token:
-            print("No common CSRF/hidden tokens found on login page. Proceeding without them.")
+        # Step 3: Make the GET request to the API endpoint using the same session
+        api_response = session.get(api_url, verify=False, timeout=15)
+        api_response.raise_for_status() # Check for HTTP errors (like 4xx, 5xx)
 
-        # --- Determine the actual POST URL (might be different from LOGIN_URL) ---
-        # Inspect the <form> tag on the login page to find the 'action' attribute
-        form_tag = soup_login.find('form') # Find the first form, adjust if multiple
-        post_url = LOGIN_URL # Default to the page URL
-        if form_tag and form_tag.get('action'):
-            action_url = form_tag['action']
-            # Handle relative URLs if necessary
-            if action_url.startswith('/'):
-                 # Combine base URL with relative path (needs urlparse)
-                 from urllib.parse import urljoin
-                 post_url = urljoin(LOGIN_URL, action_url)
-            elif action_url: # If it's a full URL or different path
-                 post_url = action_url
-            print(f"Form action URL found: {post_url}")
+        # Step 4: Parse the JSON response
+        json_data = api_response.json()
+        print(f"API Response JSON: {json_data}")
+
+        # Step 5: Extract the balance
+        if json_data.get("code") == 200 and "data" in json_data and "balance" in json_data["data"]:
+            balance = json_data["data"]["balance"]
+            # Ensure balance is a number (float)
+            try:
+                balance = float(balance)
+                print(f"Balance extracted successfully: {balance}")
+            except (ValueError, TypeError):
+                print(f"API returned balance, but it wasn't a number: {balance}")
+                balance = f"API Error: Unexpected balance format ({balance})"
+
         else:
-             print("No <form action=...> found, using LOGIN_URL for POST.")
-        # --- End of POST URL determination ---
+            # Handle cases where the API call succeeded but didn't return expected data
+            print(f"API call successful, but response format unexpected or indicates error.")
+            error_desc = json_data.get("desc", "Unknown API response format")
+            balance = f"API Error: {error_desc}"
 
 
-        print(f"Attempting to POST login data to {post_url}...")
-        # 3. Perform login POST request with account number and any found tokens
-        login_response = session.post(post_url, data=login_data, verify=False, timeout=15)
-        login_response.raise_for_status()
-
-        # 4. Check if login was successful (adjust checks as needed)
-        # Look for indicators like redirection URL, specific text ("Welcome", "Logout"), lack of "Login" button
-        logged_in_url = login_response.url.strip('/')
-        expected_dashboard_url = BALANCE_PAGE_URL.strip('/')
-        if logged_in_url == expected_dashboard_url or "Logout" in login_response.text or "Account Summary" in login_response.text:
-            print("Login successful (probably). Parsing balance page...")
-            balance_page_content = login_response.content
-
-            # If balance is definitely on a DIFFERENT page, uncomment and modify GET request
-            # if logged_in_url != expected_dashboard_url:
-            #     print(f"Navigating to expected balance page {BALANCE_PAGE_URL}...")
-            #     balance_page_response = session.get(BALANCE_PAGE_URL, verify=False, timeout=15)
-            #     balance_page_response.raise_for_status()
-            #     balance_page_content = balance_page_response.content
-
-            soup_balance = BeautifulSoup(balance_page_content, 'html.parser')
-            balance_element = None
-            print("Searching for balance element...")
-            # Find balance using the parent <p> tag method
-            possible_p_tags = soup_balance.find_all('p')
-            for p_tag in possible_p_tags:
-                if 'Remaining Balance:' in p_tag.get_text():
-                    print("Found relevant <p> tag.")
-                    balance_element = p_tag.find('span')
-                    if balance_element:
-                        print("Found <span> tag inside.")
-                        break
-                    else:
-                        print("No <span> inside relevant <p>.")
-            # --- End balance finding ---
-
-            if balance_element:
-                raw_balance_text = balance_element.get_text(strip=True)
-                print(f"Raw balance text found: {raw_balance_text}")
-            else:
-                print("Balance element structure not found on dashboard page.")
-                print("--- DASHBOARD HTML START (DEBUG) ---")
-                print(soup_balance.prettify()[:2000]) # Print first 2000 chars of dashboard HTML
-                print("--- DASHBOARD HTML END (DEBUG) ---")
-                raw_balance_text = "Balance element structure not found."
-        else:
-            # Login failed - print details
-            print(f"Login failed. Status code: {login_response.status_code}. Final URL: {login_response.url}")
-            print("--- LOGIN FAILED - PAGE CONTENT START ---")
-            print(login_response.text[:1000]) # Print first 1000 chars of response
-            print("--- LOGIN FAILED - PAGE CONTENT END ---")
-            raw_balance_text = "Login failed. Check credentials, tokens, or website changes."
-
+    except requests.exceptions.Timeout:
+        print("Error: Request timed out.")
+        balance = "Error: Request timed out."
     except requests.exceptions.RequestException as e:
-        print(f"Network or HTTP error during scraping: {e}")
-        raw_balance_text = f"Network Error: {e}"
+        print(f"Network or HTTP error during API call: {e}")
+        balance = f"Network Error: {e}"
+    except ValueError: # JSONDecodeError inherits from ValueError
+         print("Error: Could not decode JSON response from API.")
+         balance = "API Error: Invalid JSON response."
     except Exception as e:
-        print(f"An unexpected error occurred during scraping: {e}")
-        raw_balance_text = f"Script Error: {e}"
+        print(f"An unexpected error occurred: {e}")
+        balance = f"Script Error: {e}"
     finally:
         session.close()
 
-    return raw_balance_text
+    # Return the numeric balance or an error string
+    return balance
 
 # --- Main Execution ---
 if __name__ == "__main__":
     if not all([DESCO_ACCOUNT_NO, BOT_TOKEN, CHAT_ID]):
         print("Error: Missing one or more secrets (DESCO_ACCOUNT_NO, BOT_TOKEN, CHAT_ID). Check GitHub Secrets.")
     else:
-        print("Starting DESCO balance check...")
-        current_balance_text = get_desco_balance()
-        send_telegram_message(current_balance_text)
+        print("Starting DESCO balance check via API...")
+        current_balance = get_desco_balance_api()
+
+        # Check if we got a number or an error string
+        if isinstance(current_balance, (int, float)):
+            send_telegram_message(current_balance) # Pass the number directly
+        else:
+            # If it's an error string, send it as is
+            tz = zoneinfo.ZoneInfo(YOUR_TIMEZONE)
+            now = datetime.now(tz)
+            timestamp = now.strftime('%d-%b-%Y %I:%M %p')
+            error_message = f"DESCO Balance Update ({timestamp}):\n\nFailed to retrieve balance.\nError: {current_balance}"
+            # Need to call the Telegram send function directly for errors
+            api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+            try:
+                requests.post(api_url, json={'chat_id': CHAT_ID, 'text': error_message}, timeout=10)
+                print("Error message sent to Telegram.")
+            except Exception as e_send:
+                print(f"Failed to send error message to Telegram: {e_send}")
+
         print("Script finished.")
