@@ -59,70 +59,104 @@ def send_telegram_message(raw_balance_text):
         print(f"Error sending Telegram message: {e}")
 
 def get_desco_balance():
-    """Logs into DESCO using account number, scrapes balance, and returns the RAW text."""
+    """Logs into DESCO using account number (handles potential CSRF), scrapes balance."""
     raw_balance_text = "Could not retrieve balance"
     session = requests.Session()
-    session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}) # Add User-Agent
+    session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
 
     try:
-        print(f"Attempting to login at {LOGIN_URL}...")
+        print(f"Fetching login page to find tokens: {LOGIN_URL}...")
+        # 1. Get the login page first
+        get_response = session.get(LOGIN_URL, verify=False, timeout=15)
+        get_response.raise_for_status()
+        soup_login = BeautifulSoup(get_response.content, 'html.parser')
+
+        # 2. Find potential hidden tokens (common names, adjust if needed)
         login_data = { ACCOUNT_NO_FIELD_NAME: DESCO_ACCOUNT_NO }
-        
-        # Add verify=False to handle potential SSL errors
-        login_response = session.post(LOGIN_URL, data=login_data, verify=False, timeout=15) # Added timeout and verify=False
+        possible_token_names = ['csrf_token', '_token', 'authenticity_token', '__VIEWSTATE', '__EVENTVALIDATION']
+        found_token = False
+        for token_name in possible_token_names:
+            token_element = soup_login.find('input', {'name': token_name})
+            if token_element and token_element.get('value'):
+                login_data[token_name] = token_element['value']
+                print(f"Found hidden token: {token_name}")
+                found_token = True
+                # break # Uncomment if you're sure there's only one token needed
+
+        if not found_token:
+            print("No common CSRF/hidden tokens found on login page. Proceeding without them.")
+
+        # --- Determine the actual POST URL (might be different from LOGIN_URL) ---
+        # Inspect the <form> tag on the login page to find the 'action' attribute
+        form_tag = soup_login.find('form') # Find the first form, adjust if multiple
+        post_url = LOGIN_URL # Default to the page URL
+        if form_tag and form_tag.get('action'):
+            action_url = form_tag['action']
+            # Handle relative URLs if necessary
+            if action_url.startswith('/'):
+                 # Combine base URL with relative path (needs urlparse)
+                 from urllib.parse import urljoin
+                 post_url = urljoin(LOGIN_URL, action_url)
+            elif action_url: # If it's a full URL or different path
+                 post_url = action_url
+            print(f"Form action URL found: {post_url}")
+        else:
+             print("No <form action=...> found, using LOGIN_URL for POST.")
+        # --- End of POST URL determination ---
+
+
+        print(f"Attempting to POST login data to {post_url}...")
+        # 3. Perform login POST request with account number and any found tokens
+        login_response = session.post(post_url, data=login_data, verify=False, timeout=15)
         login_response.raise_for_status()
 
-        # Adjust login success check based on DESCO's site behavior after login
-        # Check URL or specific text on the page to confirm login worked
-        if "dashboard" in login_response.url or "Account Summary" in login_response.text or "Logout" in login_response.text: # Added "Logout" check
+        # 4. Check if login was successful (adjust checks as needed)
+        # Look for indicators like redirection URL, specific text ("Welcome", "Logout"), lack of "Login" button
+        logged_in_url = login_response.url.strip('/')
+        expected_dashboard_url = BALANCE_PAGE_URL.strip('/')
+        if logged_in_url == expected_dashboard_url or "Logout" in login_response.text or "Account Summary" in login_response.text:
             print("Login successful (probably). Parsing balance page...")
             balance_page_content = login_response.content
-            
-            # If balance is on a DIFFERENT page you have to navigate to:
-            # Uncomment and adjust if needed
-            # if login_response.url.strip('/') != BALANCE_PAGE_URL.strip('/'):
-            #     print(f"Navigating to {BALANCE_PAGE_URL}...")
-            #     balance_page_response = session.get(BALANCE_PAGE_URL, verify=False, timeout=15) # Added verify=False and timeout
+
+            # If balance is definitely on a DIFFERENT page, uncomment and modify GET request
+            # if logged_in_url != expected_dashboard_url:
+            #     print(f"Navigating to expected balance page {BALANCE_PAGE_URL}...")
+            #     balance_page_response = session.get(BALANCE_PAGE_URL, verify=False, timeout=15)
             #     balance_page_response.raise_for_status()
             #     balance_page_content = balance_page_response.content
 
-            soup = BeautifulSoup(balance_page_content, 'html.parser')
+            soup_balance = BeautifulSoup(balance_page_content, 'html.parser')
             balance_element = None
             print("Searching for balance element...")
-
-            # --- FIND BALANCE BASED ON PARENT <p> TAG ---
-            possible_p_tags = soup.find_all('p') # Find all paragraph tags
+            # Find balance using the parent <p> tag method
+            possible_p_tags = soup_balance.find_all('p')
             for p_tag in possible_p_tags:
-                # Check if this <p> tag contains the specific text 'Remaining Balance:'
-                # Using 'in' for flexibility in case of extra spaces
                 if 'Remaining Balance:' in p_tag.get_text():
-                    print("Found relevant <p> tag containing 'Remaining Balance:'.")
-                    # Find the <span> tag *directly inside* this specific <p> tag
+                    print("Found relevant <p> tag.")
                     balance_element = p_tag.find('span')
                     if balance_element:
-                        print("Found <span> tag inside the <p> tag.")
-                        break # Stop searching once found
+                        print("Found <span> tag inside.")
+                        break
                     else:
-                        print("Found <p> tag, but no direct <span> inside it.")
-            # --- END OF FINDING LOGIC ---
+                        print("No <span> inside relevant <p>.")
+            # --- End balance finding ---
 
             if balance_element:
                 raw_balance_text = balance_element.get_text(strip=True)
                 print(f"Raw balance text found: {raw_balance_text}")
             else:
-                # Debugging print statements MUST be indented correctly inside this else block
-                print("Balance element structure (<p> with 'Remaining Balance:' containing a <span>) not found.")
-                print("--- PAGE HTML START ---")
-                print(soup.prettify()) # Print the HTML for debugging
-                print("--- PAGE HTML END ---")
+                print("Balance element structure not found on dashboard page.")
+                print("--- DASHBOARD HTML START (DEBUG) ---")
+                print(soup_balance.prettify()[:2000]) # Print first 2000 chars of dashboard HTML
+                print("--- DASHBOARD HTML END (DEBUG) ---")
                 raw_balance_text = "Balance element structure not found."
-        # This else corresponds to the 'if' checking for successful login
         else:
+            # Login failed - print details
             print(f"Login failed. Status code: {login_response.status_code}. Final URL: {login_response.url}")
             print("--- LOGIN FAILED - PAGE CONTENT START ---")
             print(login_response.text[:1000]) # Print first 1000 chars of response
             print("--- LOGIN FAILED - PAGE CONTENT END ---")
-            raw_balance_text = "Login failed."
+            raw_balance_text = "Login failed. Check credentials, tokens, or website changes."
 
     except requests.exceptions.RequestException as e:
         print(f"Network or HTTP error during scraping: {e}")
@@ -132,7 +166,7 @@ def get_desco_balance():
         raw_balance_text = f"Script Error: {e}"
     finally:
         session.close()
-        
+
     return raw_balance_text
 
 # --- Main Execution ---
